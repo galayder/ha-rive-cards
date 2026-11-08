@@ -1,0 +1,33 @@
+{
+  "name": "ha-rive-cards",
+  "version": "1.0.0",
+  "description": "Home Assistant Lovelace cards powered by Rive animations",
+  "type": "module",
+  "module": "dist/ha-rive-cards.js",
+  "scripts": {
+    "dev": "vite build --watch --mode development",
+    "build": "tsc --noEmit && vite build",
+    "typecheck": "tsc --noEmit",
+    "rive:validate": "node scripts/validate-riv.mjs rives/compiled"
+  },
+  "keywords": [
+    "home-assistant",
+    "lovelace",
+    "rive"
+  ],
+  "author": "Oleh Stepanenko",
+  "license": "MIT",
+  "repository": {
+    "type": "git",
+    "url": "git+https://github.com/galayder/ha-rive-cards.git"
+  },
+  "dependencies": {
+    "@rive-app/webgl2": "^2.49.4",
+    "lit": "^3.3.3"
+  },
+  "devDependencies": {
+    "@types/node": "^26.6.6",
+    "typescript": "^7.0.2",
+    "vite": "^8.3.6"
+  }
+}

@@ -1,0 +1,93 @@
+# ha-rive-cards — project rules
+
+This repo builds custom Home Assistant Lovelace cards that render Rive animations.
+Stack: Lit 3, TypeScript (strict), Vite library build, `@rive-app/webgl2`.
+Output: one ES module, `dist/ha-rive-cards.js`, loaded by HA as a dashboard resource and distributed through HACS.
+
+## Layout
+
+- `src/index.ts` — entry. Registers every card with `customElements.define` and adds it to `window.customCards`.
+- `src/types.ts` — minimal HA types (`HomeAssistant`, `HassEntity`, config interfaces). Add to these rather than pulling in `custom-card-helpers`.
+- `src/cards/base-rive-card.ts` — abstract base class. All Rive cards extend it.
+- `src/cards/<name>-card.ts` — one file per card.
+- `src/editors/<name>-card-editor.ts` — the visual editor for that card.
+- `rives/source/` — `.rev` editor files. `rives/compiled/` — exported `.riv` files. Users copy `.riv` files to `<config>/www/rives/` and reference them as `/local/rives/<file>.riv`.
+
+## Commands
+
+- `npm run dev` — rebuilds `dist/` on every change (watch mode). Point an HA dashboard resource at the built file to test.
+- `npm run build` — typecheck, then production build.
+- `npm run rive:validate` — checks `.riv` headers in `rives/compiled/`.
+- Node version is pinned in `.nvmrc`; run `nvm use` first.
+
+## Writing a card
+
+1. Create `src/cards/<name>-card.ts` with a class extending `BaseRiveCard<YourConfig>`, where `YourConfig extends BaseRiveCardConfig`.
+2. Implement the three abstract members:
+   - `validateConfig(config)` — throw `new Error("readable message")` for bad config. HA shows the message in the card.
+   - `watchedEntities()` — every entity id the card reads. Only changes to these trigger a sync.
+   - `syncToRive(hass, rive)` — read entity state from `hass.states` and write it to Rive inputs.
+3. Optionally override `handleTap()` and `renderOverlay()`.
+4. Add `static getConfigElement()` and `static getStubConfig(hass)` (see below).
+5. Register the card in the `cards` array in `src/index.ts`. The tag name is what users write after `custom:`.
+
+Do not override `render`, `updated`, `shouldUpdate`, `connectedCallback` or `disconnectedCallback` without calling `super` — the base class relies on them for the Rive lifecycle.
+
+## Lit conventions
+
+- Decorators are legacy (`experimentalDecorators: true`, `useDefineForClassFields: false`). Import from `lit/decorators.js`.
+- `hass` is `@property({ attribute: false })`. Internal reactive data is `@state()`. Never reflect `hass` or config to attributes.
+- Never declare a reactive property with a class field initializer (`@state() foo = 1` is fine; a plain `foo = 1` that shadows a decorated accessor is not).
+- Styles go in `static styles = css\`...\``. Use HA theme variables (`--primary-color`, `--primary-text-color`, `--card-background-color`, `--error-color`) so cards follow the user's theme.
+- Wrap card content in `<ha-card>`.
+
+## Handling `hass` updates
+
+HA sets `hass` on every card for every state change in the whole system, often several times a second. So:
+
+- Don't re-render on `hass` changes. The base class's `shouldUpdate` returns `false` when only `hass` changed and pushes the new state into Rive instead.
+- Compare entity objects by reference (`prev.states[id] !== hass.states[id]`). HA replaces the object when the entity changes, so this is cheap and exact.
+- Keep `syncToRive` idempotent. It runs after load, after config changes, and after every relevant `hass` change. Setting an input to the value it already has must be harmless; the base helpers skip no-op writes.
+- Missing entities are normal (renamed, unavailable). Return early; don't throw.
+
+## Binding entity state to Rive state machine inputs
+
+Use the helpers on `BaseRiveCard`. They look up the input by name in `config.state_machine` and silently do nothing if the input doesn't exist or has the wrong type.
+
+- Boolean (`is_on` and similar): `this.setBooleanInput("is_on", ON_STATES.has(entity.state))`. Treat `on`, `open`, `home`, `playing`, `unlocked`, `active` as true unless the card needs otherwise.
+- Number: `this.setNumberInput("brightness", value)`. Parse with `Number.parseFloat`, skip non-finite values, and convert ranges where the animation expects them (e.g. brightness 0–255 → 0–100).
+- Trigger: `this.fireTrigger("changed")`. Fire only on a real transition — remember the previous state in a private field and compare. Never fire on the first sync after load.
+
+Input names come from the `.riv` file, so make them configurable (as in `rive-entity-card`'s `bindings`) instead of hard-coding them, unless the card ships with its own animation.
+
+Rive marks state machine inputs as deprecated in favour of data binding (view models). Inputs still work in the current runtime. If a new card uses data binding instead, add helpers for it on the base class rather than in the card.
+
+## Rive lifecycle (handled by the base class)
+
+- The Rive instance is created in `updated()` once the canvas exists, and recreated only when `src`, `artboard`, `state_machine` or `fit` change.
+- `onLoad` calls `resizeDrawingSurfaceToCanvas()`, then the first `syncToRive`.
+- A `ResizeObserver` on the canvas calls `resizeDrawingSurfaceToCanvas()` when the card is resized.
+- `disconnectedCallback` disconnects the observer and calls `rive.cleanup()`, which frees the WASM memory and WebGL context. Browsers allow only ~16 WebGL contexts per page, so leaking instances breaks other cards. `connectedCallback` rebuilds the instance when HA reattaches the card.
+- Callbacks check `this.rive === rive` so a slow load from an old instance can't touch a newer one.
+- The Rive engine (`rive.wasm`, plus `rive_fallback.wasm` for older browsers) is served locally, not from a CDN. The `riveWasm` plugin in `vite.config.ts` copies both into `dist/`, and `src/rive-runtime.ts` points `RuntimeLoader` at them relative to the bundle's own URL. `base-rive-card.ts` imports `rive-runtime` before anything else; keep it that way, because the URLs must be set before the first Rive instance is created. The `.wasm` files must be deployed alongside `ha-rive-cards.js`.
+
+## Visual editor — always build one
+
+Every card must have a companion editor so it can be configured from the dashboard UI.
+
+- In the card: `static async getConfigElement() { await import("../editors/<name>-card-editor"); return document.createElement("<name>-card-editor"); }`. The dynamic import keeps the editor out of the card's startup path.
+- Also add `static getStubConfig(hass)` returning a sensible starting config, so the card works when picked from the card picker.
+- The editor is a `LitElement` with `@property({ attribute: false }) hass` and a `setConfig(config)` method.
+- Prefer HA's built-in `<ha-form>` with a `schema` of selectors (`entity`, `text`, `number`, `select`, `boolean`, `object`) and a `computeLabel` function. It matches HA's look and handles validation.
+- On every change, dispatch `new CustomEvent("config-changed", { detail: { config }, bubbles: true, composed: true })`. Never mutate the config object you were given; create a new one.
+- The editor file registers itself, guarded by `if (!customElements.get(tag))`.
+
+## Registration
+
+In `src/index.ts`, every card is defined once (guarded with `customElements.get`) and pushed into `window.customCards` with `type` (the tag), `name`, `description` and `preview`. This makes it appear in HA's "Add card" picker.
+
+## Quality bar
+
+- `npm run build` must pass with no TypeScript errors.
+- No `any`. Use the types in `src/types.ts`.
+- No runtime dependencies beyond `lit` and `@rive-app/webgl2` without a clear reason; everything ships in one bundle.
